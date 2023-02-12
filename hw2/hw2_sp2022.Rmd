@@ -6,6 +6,10 @@ author:
 - (Sukie) Xiuqi Yang, 
 date: 'Due: 11:59 PM,  Sunday, 02/12'
 output:
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: '4'
   html_document:
     code_folding: show
     highlight: haddock
@@ -14,10 +18,6 @@ output:
     toc: yes
     toc_depth: 4
     toc_float: yes
-  pdf_document:
-    number_sections: yes
-    toc: yes
-    toc_depth: '4'
   word_document:
     toc: yes
     toc_depth: '4'
@@ -43,6 +43,8 @@ library(ggrepel)
 library(patchwork)
 library(latex2exp)
 library(gt)
+library(tidyr)
+library(dplyr)
 library(tidyverse)
 ```
 
@@ -237,46 +239,271 @@ We will try to use mRNA expression data alone without the labels to classify 4 s
 We first read the data using `data.table::fread()` which is a faster way to read in big data than `read.csv()`. 
 
 ```{r}
+setwd("C:\\Users\\10369\\Box\\course23spring")
 brca <- fread(here('data','brca_subtype.csv'))
 
 # get the sub-type information
 brca_subtype <- brca$BRCA_Subtype_PAM50
 brca <- brca[,-1]
+num_gene <- ncol(brca)
+dim(brca)
+
 ```
 
 1. Summary and transformation
 
     a) How many patients are there in each sub-type? 
 
+Answer: 1160 patients.
+
     b) Randomly pick 5 genes and plot the histogram by each sub-type.
 
-    c) Remove gene with zero count and no variability. Then apply logarithmic transform.
+```{r}
+# randomly select 5 gene
+set.seed(10)
+sample_idx <- sample(num_gene, 5)  
 
+brca %>% 
+  select(all_of(sample_idx)) %>%      # select column by index
+  pivot_longer(cols = everything()) %>%     # for facet(0)
+  ggplot(aes(x = value, y = ..density..)) +
+  geom_histogram(aes(fill = name)) +
+  facet_wrap(~name, scales = "free") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+    c) Remove gene with zero count and no variability. Then apply logarithmic transform.
+```{r}
+# remove genes with 0 counts
+sel_cols <- which(colSums(abs(brca)) != 0)
+brca_sub <- brca[, sel_cols, with=F]
+dim(brca_sub)
+
+# log to make it spread out
+brca_sub <- log2(as.matrix(brca_sub+1e-10)) 
+```
 
 2. Apply kmeans on the transformed dataset with 4 centers and output the discrepancy table between the real sub-type `brca_subtype` and the cluster labels.
+```{r}
+system.time({brca_sub_kmeans <- kmeans(x = brca_sub, 4)})
 
+# save the results as RDS
+saveRDS(brca_sub_kmeans, "brca_kmeans.RDS")
+brca_sub_kmeans <- readRDS("brca_kmeans.RDS")
+# discrepancy table 
+
+table(brca_subtype, brca_sub_kmeans$cluster)
+```
 3. Spectrum clustering: to scale or not to scale?
 
     a) Apply PCA on the centered and scaled dataset. How many PCs should we use and why? You are encouraged to use `irlba::irlba()`.
     
+Answer: 4 PCs should be used based on the elbow rule because further increasing number of PCs will  not give us much more information (PVE improvement lower than 0.03).
+    
+```{r pca}
+pca_ret <- prcomp(brca_sub, center = T, scale. = T)
+
+# save the result
+# only save a few leading PCs
+pca_ret$rotation <- pca_ret$rotation[, 1:20]   
+pca_ret$x <- pca_ret$x[, 1:20]
+saveRDS(pca_ret, "brca_pca.RDS")
+
+pca_ret <- readRDS("brca_pca.RDS")
+
+# Plot scree plot of PVE
+pve <- summary(pca_ret)$importance[2, 1:10]
+plot(pve, type="b", pch = 19, frame = FALSE)
+
+```
     b) Plot PC1 vs PC2 of the centered and scaled data and PC1 vs PC2 of the centered but unscaled data side by side. Should we scale or not scale for clustering process? Why? (Hint: to put plots side by side, use `gridExtra::grid.arrange()` or `ggpubr::ggrrange()` or `egg::ggrrange()` for ggplots; use `fig.show="hold"` as chunk option for base plots)
+
+Answer: clustering based on unscaled data are preferred. Rescaling the data could cause information loss, particularly if the original data had crucial information that was not captured by the mean and standard deviation. Besides, rescaling implicitly assumes that the distribution is normal, which is usually not the case in the distribution of genes. Unscaled data preserve the original information and help  tp produce more distinguishable clusters.
+
+```{r pca}
+# center and scale the data
+brca_sub_scaled_centered <- scale(as.matrix(brca_sub), center = T, scale = T)
+
+svd_ret <- irlba::irlba(brca_sub_scaled_centered, nv = 2)
+
+pc_score <- (svd_ret$u[, 1:2])*(svd_ret$d[1:2])  # from svd 
+
+# apply kmean
+kmean_ret <- kmeans(x = pc_score, 4)
+
+p1 <- data.table(x = pc_score[,1], 
+                y = pc_score[,2],
+                col = as.factor(brca_subtype),
+                cl = as.factor(kmean_ret$cluster)) %>%
+  ggplot() + 
+  geom_point(aes(x = x, y = y, col = col, shape = cl)) +
+  scale_color_manual(labels = c("Basal", "Her2", "LumA", "LumB"),
+                     values = scales::hue_pal()(4)) +
+  scale_shape_manual(labels = c("Clulster 1", "Cluster 2","Cluster 3", "Cluster 4"),
+                     values = c(4,8, 10, 16)) + 
+  theme_bw() +
+  labs(color = "Cancer type", shape = "Cluster") +
+  xlab("PC1") +
+  ylab("PC2")
+
+brca_sub_unscaled_centered <- scale(as.matrix(brca_sub), center = T, scale = F)
+
+svd_ret <- irlba::irlba(brca_sub_unscaled_centered, nv = 2)
+
+pc_score <- (svd_ret$u[, 1:2])*(svd_ret$d[1:2])  # from svd 
+
+# apply kmean
+kmean_ret <- kmeans(x = pc_score, 4)
+
+p2 <- data.table(x = pc_score[,1], 
+                y = pc_score[,2],
+                col = as.factor(brca_subtype),
+                cl = as.factor(kmean_ret$cluster)) %>%
+  ggplot() + 
+  geom_point(aes(x = x, y = y, col = col, shape = cl)) +
+  scale_color_manual(labels = c("Basal", "Her2", "LumA", "LumB"),
+                     values = scales::hue_pal()(4)) +
+  scale_shape_manual(labels = c("Clulster 1", "Cluster 2","Cluster 3", "Cluster 4"),
+                     values = c(4,8, 10, 16)) + 
+  theme_bw() +
+  labs(color = "Cancer type", shape = "Cluster") +
+  xlab("PC1") +
+  ylab("PC2")
+p2
+ggarrange(p1, p2, ncol = 2, nrow = 1)
+```
 
 4. Spectrum clustering: center but do not scale the data
 
     a) Use the first 4 PCs of the centered and unscaled data and apply kmeans. Find a reasonable number of clusters using within sum of squared with the elbow rule.
     
+    Based on the elbow rule, we would choose 5 as the reasonable number of clusters.
+    
+```{r }
+svd_ret <- irlba::irlba(brca_sub_unscaled_centered, nv = 4)
+
+pc_score <- (svd_ret$u[, 1:4])*(svd_ret$d[1:4])  # from svd 
+
+set.seed(10)
+
+# function to compute total within-cluster sum of square 
+wss <- function(df, k) {
+  kmeans(df, k, nstart = 10)$tot.withinss
+}
+
+
+k.values <- 2:15
+
+wss_values <- sapply(k.values, 
+                     function(k) kmeans(brca_sub_unscaled_centered, centers = k)$tot.withinss)
+
+
+plot(k.values, wss_values,
+       type="b", pch = 19, frame = FALSE, 
+       xlab="Number of clusters K",
+       ylab="Total within-clusters sum of squares")
+
+
+```
+
     b) Choose an optimal cluster number and apply kmeans. Compare the real sub-type and the clustering label as follows: Plot scatter plot of PC1 vs PC2. Use point color to indicate the true cancer type and point shape to indicate the clustering label. Plot the kmeans centroids with black dots. Summarize how good is clustering results compared to the real sub-type.
     
+Answer: The optimal cluster number does not perform well in identifying real sub-types. Though cluster 1 and 3 pretty much identify "Basal", there is a mix of LumA and lumB in cluster 4 or 5. 
+```{r }
+# apply kmean
+kmean_ret <- kmeans(x = pc_score, 5)
+
+# Extract the centroids
+centroids <- data.frame(x = kmean_ret$centers[,1], y = kmean_ret$centers[,2])
+
+
+p <- data.table(x = pc_score[,1], 
+                y = pc_score[,2],
+                col = as.factor(brca_subtype),
+                cl = as.factor(kmean_ret$cluster)) %>%
+  ggplot() + 
+  geom_point(aes(x = x, y = y, col = col, shape = cl))  +
+  scale_color_manual(labels = c("Basal", "Her2", "LumA", "LumB"),
+                     values = scales::hue_pal()(4)) +
+  scale_shape_manual(labels = c("Clulster 1", "Cluster 2","Cluster 3", "Cluster 4", "Cluster 5"),
+                     values = c(4,8, 10, 17, 20)) + 
+  theme_bw() +
+  labs(color = "Cancer type", shape = "Cluster") +
+  xlab("PC1") +
+  ylab("PC2")
+p +  geom_point(data=centroids,x = centroids$x, y = centroids$y,  color = "black", size = 3, shape = 16)
+``` 
+   
     c) Compare the clustering result from applying kmeans to the original data and the clustering result from applying kmeans to 4 PCs. Does PCA help in kmeans clustering? What might be the reasons if PCA helps?
     
-    d) Now we have an x patient with breast cancer but with unknown sub-type. We have this patient's mRNA sequencing data. Project this x patient to the space of PC1 and PC2. (Hint: remember we remove some gene with no counts or no variablity, take log and centered) Plot this patient in the plot in iv) with a black dot. Calculate the Euclidean distance between this patient and each of centroid of the cluster. Can you tell which sub-type this patient might have? 
+The kmeans clustering using 4PCs separates the four types almost as well as the kmeans clustering with original data. The betweenss value also increases with the clustering analysis based on 4 PCs, suggesting that the four clusters are even more separate from one another. Pre-process the data with PCA before cluster analysis can help to reduce the dimension of the data, making it easier to analyze. As I plotted in Q3 above, based on the plot of the proportion of Variance Explained (PVE), 4 PCs already capture most of the variance in the original data. This signals that 4 PCs already capture the most important feature of the data and it help with efficiency of cluster analysis. 
+
+```{r }
+
+svd_ret <- irlba::irlba(brca_sub_unscaled_centered, nv = 4)
+
+pc_score <- (svd_ret$u[, 1:4])*(svd_ret$d[1:4])  # from svd 
+kmean_ret4 <- kmeans(x = pc_score, 4)
+
+## rely on PC
+table(brca_subtype, brca_sub_kmeans$cluster)
+## based on original data
+table(brca_subtype, kmean_ret4$cluster)
+table(brca_sub_kmeans$betweenss, kmean_ret4$betweenss)
+```    
     
+    d) Now we have an x patient with breast cancer but with unknown sub-type. We have this patient's mRNA sequencing data. Project this x patient to the space of PC1 and PC2. (Hint: remember we remove some gene with no counts or no variablity, take log and centered) Plot this patient in the plot in iv) with a black dot. Calculate the Euclidean distance between this patient and each of centroid of the cluster. Can you tell which sub-type this patient might have? 
+
+Euclidean distance between this patient and each of centroid of the cluster are 579.1515, 548.4973, 509.4033, 109.9861, respectively. The patient might be having Basal sub-type of breast cancer.
+
 ```{r}
 x_patient <- fread(here('data','brca_x_patient.csv'))
+new_df <- rbind(brca, x_patient)
+
+sel_cols2 <- which(colSums(abs(new_df)) != 0)
+x_patient_sub <- new_df[, sel_cols2, with=F]
+dim(x_patient_sub)
+
+# log to make it spread out
+x_patient_sub <- log2(as.matrix(x_patient_sub+1e-10)) 
+
+patient_sub_centered <- scale(as.matrix(x_patient_sub), center = T, scale = F)
+svd_ret2 <- irlba::irlba(patient_sub_centered, nv = 2)
+
+pc_score <- patient_sub_centered %*% svd_ret2$v[, 1:2]
+x_patient_pc <-pc_score[1161, ]
+x_patient_pc <- data.frame(x = x_patient_pc[1], y = x_patient_pc[2])
+ 
+# apply kmean kmean_ret <- kmeans(x = pc_score, 4)
+
+p <- data.table(x = pc_score[,1], 
+                y = pc_score[,2],
+                col = as.factor(brca_subtype),
+                cl = as.factor(kmean_ret$cluster)) %>%
+  ggplot() + 
+  geom_point(aes(x = x, y = y, col = col, shape = cl))  +
+  scale_color_manual(labels = c("Basal", "Her2", "LumA", "LumB"),
+                     values = scales::hue_pal()(4)) +
+  scale_shape_manual(labels = c("Clulster 1", "Cluster 2","Cluster 3", "Cluster 4"),
+                     values = c(4,8, 10, 17)) + 
+  theme_bw() +
+  labs(color = "Cancer type", shape = "Cluster") +
+  xlab("PC1") +
+  ylab("PC2")
+p +  geom_point(data=x_patient_pc,x = x_patient_pc$x, y = x_patient_pc$y,  color = "black", size = 3, shape = 16)
+
+# Calculate the Euclidean distances between items and the corresponding centroid
+distance1 <- sqrt(rowSums((x_patient_pc - kmean_ret$centers[1,])^2))
+distance2 <- sqrt(rowSums((x_patient_pc - kmean_ret$centers[2,])^2))
+distance3 <- sqrt(rowSums((x_patient_pc - kmean_ret$centers[3,])^2))
+distance4 <- sqrt(rowSums((x_patient_pc - kmean_ret$centers[4,])^2))
+# View the distances
+distance1;distance2; distance3;distance4
 ```
 
 
-# Case study 3: Auto data set
+# Case study 3: Auto data set (leave for next week)
 
 This question utilizes the `Auto` dataset from ISLR. The original dataset contains 408 observations about cars. It is similar to the CARS dataset that we use in our lectures. To get the data, first install the package ISLR. The `Auto` dataset should be loaded automatically. We'll use this dataset to practice the methods learn so far. 
 Original data source is here: https://archive.ics.uci.edu/ml/datasets/auto+mpg
@@ -566,7 +793,6 @@ propContains <- cleanedCoefficients %>%
 ```
 
 We find that `r propContains` of the intervals contain the true value, very close to the expected proportion (0.95).
-
 
 
 
